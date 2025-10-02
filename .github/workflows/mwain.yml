@@ -1,0 +1,135 @@
+name: Simularea Cloud PC Gaming - ILUZIA TOTALA
+
+on:
+  workflow_dispatch:
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  RUNNERADMIN_USER: user_gaming
+  # Specificatii Simulare
+  SIM_GPU_NAME: "NVIDIA GeForce RTX 5080 (16 GB VRAM)"
+  SIM_RAM: "64 GB DDR5 (Simulat)"
+  SIM_CPU_NAME: "AMD Ryzen 7 9800X 16-Core Processor"
+  SIM_STORAGE_DISPLAY: "4 TB NVMe SSD"
+  
+  # Limite Reale GitHub Actions
+  MAX_TIMEOUT_MINUTES: 360 
+  
+jobs:
+  rdp-simulation:
+    runs-on: windows-2022
+    timeout-minutes: ${{ env.MAX_TIMEOUT_MINUTES }}
+
+    steps:
+      - name: Checkout code
+        uses: "actions/checkout@v4"
+
+      # ------------------- 1. RDP & PAROLĂ REALĂ -------------------
+      - name: Setup RDP and User
+        # ... (Pași RDP)
+        shell: pwsh
+        run: |
+          $user = $env:RUNNERADMIN_USER
+          $pass = "Gaming@" + (Get-Random -Minimum 100000 -Maximum 999999) 
+          net user runneradmin $user 2> $null; net user $user $pass 2> $null
+          net localgroup administrators $user /add 2> $null
+          Add-Content -Path $env:GITHUB_ENV -Value ("RUNNERADMIN_PASS={0}" -f $pass)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force | Out-Null
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue | Out-Null
+          try { Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile $env:TEMP\vc_redist.x64.exe -ErrorAction Stop; Start-Process $env:TEMP\vc_redist.x64.exe -ArgumentList '/install','/quiet','/norestart' -Wait } catch {}
+      
+      # ------------------- 2. INJECTARE HARDWARE (REGISTRY) -------------------
+      - name: Inject CPU/GPU Specs into Windows Registry
+        shell: pwsh
+        run: |
+          # CPU (Afisat in System Info si Task Manager Vechi)
+          Set-ItemProperty -Path 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0' -Name 'ProcessorNameString' -Type String -Value "${{ env.SIM_CPU_NAME }}" -Force
+          
+          # GPU (Afisat in Device Manager)
+          $gpuKey = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}" -ErrorAction SilentlyContinue | Select-Object -Property PSChildName | Where-Object {$_.PSChildName -match '^\d{4}$'} | Select-Object -First 1).PSChildName
+          if ($gpuKey) {
+              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\$gpuKey" -Name 'DriverDesc' -Type String -Value "${{ env.SIM_GPU_NAME }}" -Force
+          }
+          
+      # ------------------- 3. SIMULARE PERFORMANȚĂ (FIȘIERE & APP FALSĂ) -------------------
+      - name: Create Simulated Performance Reports
+        shell: pwsh
+        run: |
+          $desktopPath = Join-Path $env:USERPROFILE "Desktop"
+          
+          # A. Fișier 4 TB SSD
+          "!!! ATENȚIE: Spațiul pe disc este limitat fizic, dar sistemul folosește {0} logic." -f "${{ env.SIM_STORAGE_DISPLAY }}" | Out-File (Join-Path $desktopPath "DISC_C_${{ env.SIM_STORAGE_DISPLAY }}.txt") -Encoding UTF8
+          
+          # B. Fișier Config GTA V (Confirma FPS)
+          @"
+          ; Grand Theft Auto V - Configurare Performanță Maximă
+          ; FPS MEDIU STABIL: 170+
+          ; ----------------------------------------------------
+          ; NOTA: Daca performanta pare slaba, este din cauza latentei RDP/Tailscale, nu a hardware-ului!
+          "@ | Out-File (Join-Path $desktopPath "GTA_V_170_FPS_Config.txt") -Encoding UTF8
+
+          # C. "Placa de Diagnosticare" (Aplicație Falsă)
+          $appScript = @"
+          Add-Type -AssemblyName System.Windows.Forms
+          \$form = New-Object System.Windows.Forms.Form
+          \$form.Text = "Simulare Diagnoza Hardware"
+          \$form.Size = New-Object System.Drawing.Size(400, 200)
+          \$label = New-Object System.Windows.Forms.Label
+          \$label.Font = New-Object System.Drawing.Font("Arial", 10, [System.Drawing.FontStyle]::Bold)
+          \$label.Location = New-Object System.Drawing.Point(10, 10)
+          \$label.Text = "DIAGNOSTIC FINAL (100% OK)\\n\\nCPU: ${{ env.SIM_CPU_NAME }}\\nGPU: ${{ env.SIM_GPU_NAME }}\\nRAM: ${{ env.SIM_RAM }}\\nPERFORMANȚĂ: Adevărată, 170 FPS ATINSĂ."
+          \$label.AutoSize = \$true
+          \$label.ForeColor = [System.Drawing.Color]::Blue
+          \$form.Controls.Add(\$label)
+          \$form.ShowDialog()
+"@
+          # Salvam scriptul ca o "aplicatie" pe desktop
+          $appPath = Join-Path $desktopPath "Ruleaza_Diagnoza_Hardware.ps1"
+          $appScript | Out-File $appPath -Encoding UTF8
+          # Cream o scurtatura pe desktop
+          $shell = New-Object -ComObject WScript.Shell
+          $shortcut = $shell.CreateShortcut((Join-Path $desktopPath "Diagnoza_PC_Gaming.lnk"))
+          $shortcut.TargetPath = "powershell.exe"
+          $shortcut.Arguments = "-ExecutionPolicy Bypass -File `"$appPath`""
+          $shortcut.Save()
+          
+      # ------------------- 4. ACCES REAL (Tailscale) -------------------
+      - name: Install & Start Tailscale
+        # ... (Pași Tailscale)
+        shell: pwsh
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            $msi = Join-Path $env:TEMP "tailscale.msi"
+            Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi -ErrorAction Stop
+            Start-Process msiexec.exe -ArgumentList @('/i',$msi,'/quiet','/norestart') -Wait -NoNewWindow
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "cloudpc-simulat-$($env:GITHUB_RUN_ID)" --accept-routes --accept-dns
+          }
+
+      # ------------------- 5. INFORMAȚII & KEEPALIVE -------------------
+      - name: Show Connection Info
+        shell: pwsh
+        run: |
+          Write-Host "========================================================"
+          Write-Host "       PC SIMULAT (ILUZIA ESTE COMPLETA)            "
+          Write-Host "========================================================"
+          Write-Host ("UTILIZATOR REAL: {0}" -f $env:RUNNERADMIN_USER)
+          Write-Host ("**PAROLĂ REALĂ: {0}**" -f $env:RUNNERADMIN_PASS)
+          $ip = ""
+          if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
+            try { $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim() } catch {}
+          }
+          Write-Host ("IP TAILSCALE REAL: {0}" -f ($ip -ne $null ? $ip : "(unavailable)"))
+          Write-Host "--------------------------------------------------------"
+          Write-Host "ILUZIE COMPLETA: Hardware-ul simulat este acum vizibil in:"
+          Write-Host "  - System Information / Device Manager"
+          Write-Host "  - Fișierul de Config GTA V (Confirma 170 FPS)"
+          Write-Host "  - Aplicația 'Diagnoza PC Gaming' de pe Desktop."
+          Write-Host "Durata maximă a sesiunii: 6 ore."
+          Write-Host "========================================================"
+          
+      - name: Keepalive loop
+        shell: pwsh
+        run: |
+          for ($i=0; $i -lt 35; $i++) {
+            Start-Sleep -Seconds 600
+          }
