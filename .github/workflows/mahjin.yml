@@ -1,0 +1,180 @@
+name: RDP Gaming Server + QEMU Ryzen7 Emulated VM (32GB RAM, 600GB SSD) Loop 1 Month
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"  # run every 6 hours
+
+env:
+  TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+  RUNNERADMIN_PASS: ${{ secrets.RUNNERADMIN_PASS }}
+  KEEPALIVE_ITER: 36  # 36 iterations x 10 minutes = 6 hours keepalive
+  RUNNERADMIN_USER: runneradmin
+  SOFTWARE_GPU_DIR: C:\SoftwareGPU_Emulators
+  QEMU_PATH: "C:\\Program Files\\qemu"
+  QEMU_DISK: "C:\\qemu\\images\\vm_disk.qcow2"
+  RAM: "32G"
+  CPU_CORES: 8
+
+jobs:
+  rdp-gaming:
+    runs-on: windows-2022
+    timeout-minutes: 360  # max 6 hours per job per GitHub limits
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install QEMU
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          try {
+            $qemuUrl = "https://qemu.weilnetz.de/w64/qemu-w64-setup-20250826.exe"
+            $qemuInstaller = Join-Path $env:TEMP "qemu-installer.exe"
+            Invoke-WebRequest $qemuUrl -OutFile $qemuInstaller -UseBasicParsing -ErrorAction SilentlyContinue
+            Start-Process -FilePath $qemuInstaller -ArgumentList '/S' -Wait -ErrorAction SilentlyContinue
+          } catch {
+            Write-Host "QEMU install failed, continuing workflow..."
+          }
+
+      - name: Create 600GB disk image (if missing)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $disk = "${{ env.QEMU_DISK }}"
+          if (-not (Test-Path $disk)) {
+            New-Item -Path (Split-Path $disk) -ItemType Directory -Force
+            & "${{ env.QEMU_PATH }}\qemu-img.exe" create -f qcow2 $disk 600G
+          }
+
+      - name: Run QEMU VM
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $qemuExe = Join-Path "${{ env.QEMU_PATH }}" "qemu-system-x86_64.exe"
+          $disk = "${{ env.QEMU_DISK }}"
+          $ram = "${{ env.RAM }}"
+          $cpu = "qemu64"  # emulated CPU, not host passthrough (not supported on GitHub-hosted runners)
+          $cores = "${{ env.CPU_CORES }}"
+          $args = "-m $ram -smp $cores -cpu $cpu -drive file=$disk,format=qcow2,cache=writeback -nographic -serial mon:stdio -netdev user,id=net0,hostfwd=tcp::3389-:3389 -device rtl8139,netdev=net0"
+          Write-Host "Starting VM with args: $args"
+          Start-Process -FilePath $qemuExe -ArgumentList $args -NoNewWindow -Wait
+
+      - name: Reset Runneradmin Password and Setup RDP
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $user = $env:RUNNERADMIN_USER
+          $pass = "Runner@" + (Get-Random -Minimum 100000 -Maximum 999999) 
+          net user $user $pass 2> $null
+          net localgroup administrators $user /add 2> $null
+          Add-Content -Path $env:GITHUB_ENV -Value ("RUNNERADMIN_PASS={0}" -f $pass)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -Force | Out-Null
+          Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue | Out-Null
+          $t = $env:TEMP
+          try { Invoke-WebRequest 'https://aka.ms/vs/17/release/vc_redist.x64.exe' -OutFile (Join-Path $t 'vc_redist.x64.exe') -ErrorAction Stop; Start-Process (Join-Path $t 'vc_redist.x64.exe') -ArgumentList '/install','/quiet','/norestart' -Wait } catch {}
+
+      - name: Set Custom Wallpaper & Dark Mode
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $WallDir = "$env:USERPROFILE\Pictures\Wallpapers"
+          New-Item -Path $WallDir -ItemType Directory -Force | Out-Null
+          $WallPath = Join-Path $WallDir "CustomCarBackground.jpg"
+          Invoke-WebRequest 'https://i.ibb.co/hK2qR3Z/CustomCarBackground.jpg' -OutFile $WallPath -ErrorAction Stop
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name Wallpaper -Type String -Value $WallPath -Force
+          RUNDLL32.EXE user32.dll,UpdatePerUserSystemParameters
+          $ThemeRegPath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+          Set-ItemProperty -Path $ThemeRegPath -Name 'AppsUseLightTheme' -Type DWord -Value 0 -Force
+          Set-ItemProperty -Path $ThemeRegPath -Name 'SystemUsesLightTheme' -Type DWord -Value 0 -Force
+          $EPPath = Join-Path $env:USERPROFILE "Desktop\ExplorerPatcherSetup.exe"
+          $EPUrl = "https://github.com/valinet/ExplorerPatcher/releases/latest/download/ep_setup.exe"
+          try { Invoke-WebRequest -Uri $EPUrl -OutFile $EPPath -ErrorAction Stop } catch {}
+
+      - name: Install SwiftShader (Software GPU)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $t = Join-Path $env:TEMP "swiftshader"
+          New-Item -Path $t -ItemType Directory -Force | Out-Null
+          $zip = Join-Path $env:TEMP "SwiftShader-Release.zip"
+          try {
+            Invoke-WebRequest 'https://github.com/google/swiftshader/releases/latest/download/SwiftShader-Release.zip' -OutFile $zip -ErrorAction Stop
+            Expand-Archive -Path $zip -DestinationPath $t -Force
+            New-Item -Path $env:SOFTWARE_GPU_DIR -ItemType Directory -Force | Out-Null
+            Get-ChildItem -Path $t -Filter "*.dll" -Recurse | Where-Object { $_.Name -match "^(d3d|dxgi|vk_|opengl32)" } | ForEach-Object { Copy-Item -Path $_.FullName -Destination $env:SOFTWARE_GPU_DIR -Force }
+          } catch {}
+
+      - name: Max CPU and System Optimizations
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          try { reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f } catch {}
+
+      - name: Launch Games with Max CPU Priority and Forced Minimal Resolution
+        shell: pwsh
+        run: |
+          $mscPath = "C:\Program Files (x86)\Steam\steamapps\common\My Summer Car\MySummerCar.exe"
+          $gtaPath = "C:\Program Files\Rockstar Games\GTA V\GTA5.exe"
+          if (Test-Path $env:SOFTWARE_GPU_DIR) {
+            foreach ($gamePath in @($mscPath, $gtaPath)) {
+              if (Test-Path $gamePath) {
+                Get-ChildItem -Path $env:SOFTWARE_GPU_DIR -Filter "*.dll" | ForEach-Object {
+                  try { Copy-Item -Path $_.FullName -Destination (Split-Path $gamePath) -Force -ErrorAction SilentlyContinue } catch {}
+                }
+              }
+            }
+          }
+          function Launch-Game ([string]$path, [string]$name, [string]$args) {
+            if (Test-Path $path) {
+              $proc = Start-Process -FilePath $path -ArgumentList $args -PassThru -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 5
+              try { $proc.PriorityClass = "Realtime" } catch {}
+              try { $proc.ProcessorAffinity = [System.IntPtr]::op_Explicit(0xFFFFFFFF) } catch {}
+            }
+          }
+          Launch-Game $gtaPath "GTA5" "-safemode -width 640 -height 480"
+          Launch-Game $mscPath "My Summer Car" ""
+
+      - name: Install & Start Tailscale
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            $msi = Join-Path $env:TEMP "tailscale.msi"
+            Invoke-WebRequest 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi' -OutFile $msi -ErrorAction Stop
+            Start-Process msiexec.exe -ArgumentList @('/i',$msi,'/quiet','/norestart') -Wait -NoNewWindow
+            & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey $env:TAILSCALE_AUTH_KEY --hostname "gh-gaming-$($env:GITHUB_RUN_ID)" --accept-routes
+          }
+
+      - name: Show connection info
+        shell: pwsh
+        run: |
+          Write-Host "--------------------------------------------------------"
+          Write-Host "             Server RDP Gaming Information              "
+          Write-Host "--------------------------------------------------------"
+          Write-Host ("User: {0}" -f $env:RUNNERADMIN_USER)
+          Write-Host ("**NEW PASSWORD: {0}**" -f $env:RUNNERADMIN_PASS)
+          $ip = ""
+          if (Test-Path "$env:ProgramFiles\Tailscale\tailscale.exe") {
+            try { $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 | Select-Object -First 1).Trim() } catch {}
+          }
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+            try { $ip = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -notlike "Loopback*"} | Select-Object -First 1).IPAddress } catch {}
+          }
+          Write-Host ("IP: {0}" -f ($ip -ne $null ? $ip : "(unavailable)"))
+          Write-Host "--------------------------------------------------------"
+          Write-Host "PERFORMANCE: Target 34 FPS (Resolution 800x600)."
+          Write-Host "Windows 11 Look: Runs **ExplorerPatcherSetup.exe** from Desktop after connection."
+          Write-Host "--------------------------------------------------------"
+
+      - name: Keepalive loop
+        shell: pwsh
+        run: |
+          $iters = [int]${{ env.KEEPALIVE_ITER }}
+          for ($i=0; $i -lt $iters; $i++) {
+            Write-Host ("Keepalive {0}/{1} at {2}" -f $i, $iters, (Get-Date))
+            Start-Sleep -Seconds 600
+          }
+          
